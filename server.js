@@ -399,7 +399,7 @@ async function ask(message) {
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
             headers: {Authorization: `Bearer ${process.env.OPENROUTER_API_KEY.trim()}`, "Content-Type":"application/json", "HTTP-Referer":"https://cezoo.co.in", "X-Title":"CEZOO AI Support"},
-            body: JSON.stringify({model:MODEL, temperature:0.2, max_tokens:200, messages:[{role:"system",content:SYSTEM_PROMPT},{role:"user",content:message}]}),
+            body: JSON.stringify({model:MODEL, temperature:0.2, max_tokens:500, messages:[{role:"system",content:SYSTEM_PROMPT},{role:"user",content:message}]}),
             signal:controller.signal
         });
         if (!response.ok) fail(({401:"INVALID_API_KEY",402:"INSUFFICIENT_CREDITS",403:"PROVIDER_FORBIDDEN",429:"RATE_LIMIT",503:"MODEL_UNAVAILABLE"})[response.status] || "PROVIDER_HTTP_ERROR", 502, response.status);
