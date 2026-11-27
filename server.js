@@ -374,198 +374,65 @@ Always follow all the above instructions.
 `;
 
 // ========================================
-// HEALTH CHECK
+// HEALTH CHECK AND CHAT DIAGNOSTICS
 // ========================================
-
-app.get("/", (req, res) => {
-
-    res.send("CEZOO AI Support Backend Running");
-
-});
-
-// ========================================
-// CHAT API
-// ========================================
-
-app.post("/chat", async (req, res) => {
-
-    try {
-
-        const { message } = req.body;
-
-        // Validate message
-
-        if (
-            typeof message !== "string" ||
-            !message.trim()
-        ) {
-
-            return res.status(400).json({
-                error: "Message required"
-            });
-
-        }
-
-        // Limit message length
-
-        if (message.length > 1000) {
-
-            return res.status(400).json({
-                error: "Message is too long"
-            });
-
-        }
-
-        // Check API key
-
-        if (!process.env.OPENROUTER_API_KEY) {
-
-            console.error("OpenRouter API key missing");
-
-            return res.status(503).json({
-                error: "Support assistant is temporarily unavailable."
-            });
-
-        }
-
-        // OpenRouter API request
-
-        const response = await fetch(
-
-            "https://openrouter.ai/api/v1/chat/completions",
-
-            {
-
-                method: "POST",
-
-                headers: {
-
-                    "Authorization":
-                        `Bearer ${process.env.OPENROUTER_API_KEY}`,
-
-                    "Content-Type": "application/json",
-
-                    "HTTP-Referer": "https://cezoo.co.in",
-
-                    "X-Title": "CEZOO AI Support"
-
-                },
-
-                body: JSON.stringify({
-
-                    model: "openrouter/free",
-
-                    temperature: 0.2,
-
-                    max_tokens: 200,
-
-                    messages: [
-
-                        {
-                            role: "system",
-                            content: SYSTEM_PROMPT
-                        },
-
-                        {
-                            role: "user",
-                            content: message.trim()
-                        }
-
-                    ]
-
-                }),
-
-                signal: AbortSignal.timeout(45000)
-
-            }
-
-        );
-
-        const data = await response.json();
-
-        // Handle OpenRouter errors
-
-        if (!response.ok) {
-
-            console.error(
-                "OpenRouter Error:",
-                response.status,
-                data.error?.message
-            );
-
-            return res.status(502).json({
-
-                error:
-                    "Our support assistant is temporarily unavailable. Please try again."
-
-            });
-
-        }
-
-        // Get AI response
-
-        const reply =
-            data.choices?.[0]?.message?.content;
-
-        if (typeof reply !== "string" || !reply.trim()) {
-
-            return res.status(502).json({
-
-                error: "Unable to generate a response. Please try again."
-
-            });
-
-        }
-
-        // Additional basic code response protection
-
-        const containsCode =
-            /```|<!DOCTYPE\s+html|<html\b|<script\b|<style\b/i.test(reply);
-
-        if (containsCode) {
-
-            return res.json({
-
-                reply:
-                    "I'm here to assist you with CEZOO-related questions and orders only."
-
-            });
-
-        }
-
-        // Send AI response
-
-        return res.json({
-
-            reply: reply.trim()
-
-        });
-
-    } catch (error) {
-
-        console.error("CEZOO Chat Error:", error.message);
-
-        return res.status(500).json({
-
-            error:
-                "Something went wrong. Please try again."
-
-        });
-
+const MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const TIMEOUT = 25000;
+let last = { status: "Not tested", at: null };
+let active = 0;
+let testRunning = false;
+let lastTest = 0;
+const safeStatus = status => ({status, at: new Date().toISOString()});
+async function ask(message) {
+    const start = Date.now();
+    active++;
+    let timer;
+    const controller = new AbortController();
+    function fail(code, status, upstream = null) {
+        const error = new Error(code);
+        Object.assign(error, {status, upstream});
+        throw error;
     }
-
+    try {
+        if (!process.env.OPENROUTER_API_KEY?.trim()) fail("API_KEY_MISSING", 503);
+        timer = setTimeout(() => controller.abort(), TIMEOUT);
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {Authorization: `Bearer ${process.env.OPENROUTER_API_KEY.trim()}`, "Content-Type":"application/json", "HTTP-Referer":"https://cezoo.co.in", "X-Title":"CEZOO AI Support"},
+            body: JSON.stringify({model:MODEL, temperature:0.2, max_tokens:200, messages:[{role:"system",content:SYSTEM_PROMPT},{role:"user",content:message}]}),
+            signal:controller.signal
+        });
+        if (!response.ok) fail(({401:"INVALID_API_KEY",402:"INSUFFICIENT_CREDITS",403:"PROVIDER_FORBIDDEN",429:"RATE_LIMIT",503:"MODEL_UNAVAILABLE"})[response.status] || "PROVIDER_HTTP_ERROR", 502, response.status);
+        let data;
+        try { data = await response.json(); } catch(e) { if(controller.signal.aborted) throw e; fail("INVALID_PROVIDER_RESPONSE",502); }
+        if(data.error) fail("PROVIDER_ERROR",502);
+        let reply = data.choices?.[0]?.message?.content;
+        if(typeof reply !== "string" || !reply.trim()) fail("EMPTY_AI_REPLY",502);
+        if(/```|<!DOCTYPE\s+html|<html\b|<script\b|<style\b/i.test(reply)) reply = "I'm here to assist you with CEZOO-related questions and orders only.";
+        last = {...safeStatus("WORKING"), duration_ms:Date.now()-start, upstream_http:response.status};
+        console.info("CEZOO AI", JSON.stringify(last));
+        return {reply:reply.trim()};
+    } catch(e) {
+        const code = controller.signal.aborted ? "AI_TIMEOUT" : e.status ? e.message : "PROVIDER_NETWORK_ERROR";
+        last = {...safeStatus(code), duration_ms:Date.now()-start, upstream_http:e.upstream || null};
+        console.error("CEZOO AI", JSON.stringify(last));
+        return {error:"Our support assistant is temporarily unavailable. Please try again.", code, http:controller.signal.aborted ? 504 : e.status || 502};
+    } finally { clearTimeout(timer); active--; }
+}
+app.get("/health", (req,res) => res.set("Cache-Control","no-store").json({server:"Running", api_key_configured:!!process.env.OPENROUTER_API_KEY?.trim(), model:MODEL, active_requests:active, timeout_ms:TIMEOUT, last_result:last}));
+app.get("/", (req,res) => res.set("Cache-Control","no-store").type("html").send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>CEZOO Backend Status</title><style>body{font:16px system-ui;background:#f5f8f6;color:#173b26;max-width:680px;margin:40px auto;padding:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:20px;border-radius:12px}button{background:#15803d;color:white;border:0;padding:14px 20px;border-radius:10px;cursor:pointer}</style></head><body><h1>CEZOO AI Support Backend Running</h1><p>Live diagnostics (no customer messages or API keys displayed).</p><pre id="status">Loading...</pre><button id="test">Test AI response</button><pre id="result">Click to test OpenRouter.</pre><script>const statusBox=document.getElementById('status'),result=document.getElementById('result'),button=document.getElementById('test');async function refresh(){try{const r=await fetch('/health',{cache:'no-store'});statusBox.textContent=JSON.stringify(await r.json(),null,2)}catch(e){statusBox.textContent='Health request failed'}}refresh();setInterval(refresh,3000);button.onclick=async()=>{button.disabled=true;result.textContent='Testing... maximum 25 seconds upstream';try{const r=await fetch('/test-ai',{method:'POST',signal:AbortSignal.timeout(35000)});result.textContent='HTTP '+r.status+'\\n'+JSON.stringify(await r.json(),null,2)}catch(e){result.textContent=e.message}finally{button.disabled=false;refresh()}};</script></body></html>`));
+app.post("/test-ai", async (req,res) => {
+    if(testRunning || Date.now()-lastTest<60000) return res.status(429).json({error:"Test cooldown: wait 60 seconds."});
+    testRunning=true; lastTest=Date.now();
+    try { const result=await ask("Hello, how can I place an order on CEZOO?"); const {http,...body}=result; return res.status(http||200).json({...body, duration_ms:last.duration_ms}); } finally {testRunning=false;}
 });
-
-// ========================================
-// START SERVER
-// ========================================
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-
-    console.log("CEZOO AI Support Server Running");
-
-    console.log(`Server running on port ${PORT}`);
-
+app.post("/chat", async (req,res) => {
+    const message=req.body?.message;
+    if(typeof message!=="string" || !message.trim()) return res.status(400).json({error:"Message required"});
+    if(message.length>1000) return res.status(400).json({error:"Message is too long"});
+    const {http,...body}=await ask(message.trim());
+    return res.status(http||200).json(body);
 });
+app.use((err,req,res,next)=>{ if(res.headersSent) return next(err); console.error("CEZOO request error",err.type||"UNKNOWN"); res.status(err.status===413?413:400).json({error:"Invalid request body"}); });
+const PORT=process.env.PORT||3000;
+app.listen(PORT,()=>console.log(`CEZOO AI Support Server Running on port ${PORT}`));
